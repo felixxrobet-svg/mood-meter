@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mood Meter</title>
+
+<!-- ============================================================
+     FIREBASE CONFIGURATION
+     ─────────────────────────────────────────────────────────────
+     1. Go to https://console.firebase.google.com
+     2. Create a project → Add a web app → copy the config below
+     3. Build → Realtime Database → Create database → test mode
+     ============================================================ -->
+<script type="module">
+import { initializeApp }                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue, set, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+/* ── PASTE YOUR CONFIG HERE ───────────────────────────────── */
+const firebaseConfig = {
+  apiKey:            "AIzaSyBJNXiWlC4B5AkJ5p-AN7-LPaFZJ67SxP4",
+  authDomain:        "mood-meter-ebb22.firebaseapp.com",
+  databaseURL:       "https://mood-meter-ebb22-default-rtdb.firebaseio.com",
+  projectId:         "mood-meter-ebb22",
+  storageBucket:     "mood-meter-ebb22.firebasestorage.app",
+  messagingSenderId: "605835927002",
+  appId:             "1:605835927002:web:5bd5f8a114239ae29b34e3"
+};
+/* ─────────────────────────────────────────────────────────── */
+
+/* ── ROUND LABELS (customise if needed) ──────────────────── */
+const ROUND_LABELS = [
+  { name: "Opening",    prompt: "How are you feeling before we start?" },
+  { name: "Checkpoint", prompt: "Are you convinced so far?"             },
+  { name: "Closing",    prompt: "Has your mind changed?"                },
+];
+/* ─────────────────────────────────────────────────────────── */
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+/* Firebase root ref */
+const rootRef  = ref(db, "mood_meter");
+
+/* ── Routing ── */
+const isHost = new URLSearchParams(window.location.search).get("mode") === "host";
+
+/* ── Vote score mapping ── */
+const SCORES = { interested: 100, neutral: 50, bored: 0 };
+
+/* ── Device fingerprint (one vote per round per browser) ── */
+let deviceId = localStorage.getItem("mm_device_id");
+if (!deviceId) {
+  deviceId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  localStorage.setItem("mm_device_id", deviceId);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SHARED STATE — updated by Firebase listener
+   ═══════════════════════════════════════════════════════════ */
+let state = {
+  currentRound : 0,   // 0-2
+  roundOpen    : true, // false = voting disabled, show next-round btn
+  votes        : {},   // { [deviceId]: score }
+  markers      : [],   // array of avg scores locked at end of each round
+};
+
+/* Compute weighted average from votes object */
+function average(votes) {
+  const vals = Object.values(votes || {});
+  if (!vals.length) return 50;
+  return Math.round(vals.reduce((s, v) => s + v, 0) / vals.length);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   FIREBASE LISTENER
+   ═══════════════════════════════════════════════════════════ */
+onValue(rootRef, (snap) => {
+  const raw = snap.val() || {};
+  state.currentRound = raw.currentRound ?? 0;
+  state.roundOpen    = raw.roundOpen    ?? true;
+  state.votes        = raw.votes        || {};
+  state.markers      = raw.markers      || [];
+  render();
+});
+
+/* ═══════════════════════════════════════════════════════════
+   HOST ACTIONS
+   ═══════════════════════════════════════════════════════════ */
+function hostCloseRound() {
+  const avg     = average(state.votes);
+  const markers = [...(state.markers || []), avg];
+  update(rootRef, { roundOpen: false, markers });
+}
+
+function hostNextRound() {
+  const next = state.currentRound + 1;
+  update(rootRef, {
+    currentRound : next,
+    roundOpen    : true,
+    votes        : {},          // clear votes for new round
+  });
+}
+
+function hostReset() {
+  if (!confirm("Reset everything? All rounds and votes will be cleared.")) return;
+  set(rootRef, {
+    currentRound : 0,
+    roundOpen    : true,
+    votes        : {},
+    markers      : [],
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VOTER ACTION
+   ═══════════════════════════════════════════════════════════ */
+function castVote(emotion) {
+  if (!state.roundOpen) return;
+  const votedKey = `mm_voted_r${state.currentRound}`;
+  if (localStorage.getItem(votedKey)) return; // already voted
+  update(ref(db, `mood_meter/votes`), { [deviceId]: SCORES[emotion] });
+  localStorage.setItem(votedKey, "1");
+  render(); // instant local feedback
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RENDER  (called on every Firebase update)
+   ═══════════════════════════════════════════════════════════ */
+function render() {
+  isHost ? renderHost() : renderVoter();
+}
+
+/* ── Shared bar position calc ── */
+function barState() {
+  const avg     = average(state.votes);
+  const markers = state.markers || [];
+  const total   = Object.keys(state.votes).length;
+  return { avg, markers, total };
+}
+
+/* ══════════════════════════════════════════
+   HOST VIEW
+   ══════════════════════════════════════════ */
+function renderHost() {
+  document.getElementById("host-view").style.display  = "flex";
+  document.getElementById("voter-view").style.display = "none";
+
+  const { avg, markers, total } = barState();
+  const round = state.currentRound;
+  const open  = state.roundOpen;
+  const label = ROUND_LABELS[round] || ROUND_LABELS[2];
+
+  /* round pill */
+  document.getElementById("h-round-pill").textContent =
+    `Round ${round + 1} / ${ROUND_LABELS.length} — ${label.name}`;
+  document.getElementById("h-prompt").textContent = label.prompt;
+  document.getElementById("h-vote-count").textContent =
+    `${total} vote${total !== 1 ? "s" : ""} received`;
+
+  /* bar */
+  renderBar("h-bar-wrap", avg, markers);
+
+  /* status + buttons */
+  const btnClose = document.getElementById("h-btn-close");
+  const btnNext  = document.getElementById("h-btn-next");
+  const btnReset = document.getElementById("h-btn-reset");
+  const status   = document.getElementById("h-status");
+
+  if (open) {
+    btnClose.style.display = "inline-flex";
+    btnNext.style.display  = "none";
+    status.textContent     = "Voting open";
+    status.className       = "status-badge open";
+  } else {
+    btnClose.style.display = "none";
+    const hasNext = round < ROUND_LABELS.length - 1;
+    btnNext.style.display  = hasNext ? "inline-flex" : "none";
+    btnNext.textContent    = `Open round ${round + 2}: ${ROUND_LABELS[round + 1]?.name ?? ""}`;
+    status.textContent     = "Round closed";
+    status.className       = "status-badge closed";
+  }
+
+  /* show comparison legend if we have markers */
+  renderMarkerLegend(markers);
+
+  /* wire host buttons (idempotent via onclick) */
+  btnClose.onclick = hostCloseRound;
+  btnNext.onclick  = hostNextRound;
+  btnReset.onclick = hostReset;
+}
+
+/* ══════════════════════════════════════════
+   VOTER VIEW
+   ══════════════════════════════════════════ */
+function renderVoter() {
+  document.getElementById("voter-view").style.display = "flex";
+  document.getElementById("host-view").style.display  = "none";
+
+  const { avg, markers, total } = barState();
+  const round     = state.currentRound;
+  const open      = state.roundOpen;
+  const label     = ROUND_LABELS[round] || ROUND_LABELS[2];
+  const votedKey  = `mm_voted_r${round}`;
+  const hasVoted  = !!localStorage.getItem(votedKey);
+
+  document.getElementById("v-prompt").textContent =
+    open ? label.prompt : "Round closed — watch the screen!";
+
+  /* bar (always visible on phones) */
+  renderBar("v-bar-wrap", avg, markers);
+
+  document.getElementById("v-vote-count").textContent =
+    `${total} vote${total !== 1 ? "s" : ""}`;
+
+  /* buttons area */
+  const btnsEl    = document.getElementById("v-buttons");
+  const waitEl    = document.getElementById("v-wait");
+  const closedEl  = document.getElementById("v-closed");
+
+  if (!open) {
+    btnsEl.style.display   = "none";
+    waitEl.style.display   = "none";
+    closedEl.style.display = "flex";
+    return;
+  }
+
+  if (hasVoted) {
+    btnsEl.style.display   = "none";
+    waitEl.style.display   = "flex";
+    closedEl.style.display = "none";
+  } else {
+    btnsEl.style.display   = "flex";
+    waitEl.style.display   = "none";
+    closedEl.style.display = "none";
+  }
+}
+
+/* ══════════════════════════════════════════
+   RENDER THE GRADIENT BAR + CURSOR
+   ══════════════════════════════════════════ */
+function renderBar(containerId, avg, markers) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+
+  /* Build marker pins HTML */
+  const pinHTML = (markers || []).map((m, i) => `
+    <div class="marker-pin" style="left:${m}%" title="Round ${i+1}: ${m}%">
+      <div class="marker-line"></div>
+      <div class="marker-dot"></div>
+      <div class="marker-label">R${i+1}</div>
+    </div>
+  `).join("");
+
+  wrap.innerHTML = `
+    <div class="bar-outer">
+      <div class="bar-gradient"></div>
+      ${pinHTML}
+      <div class="bar-cursor" id="${containerId}-cursor" style="left:${avg}%">
+        <div class="cursor-needle"></div>
+        <div class="cursor-bubble">${avg}%</div>
+      </div>
+    </div>
+    <div class="bar-labels-row">
+      <span class="bar-label-left">😴 Bored</span>
+      <span class="bar-label-right">😄 Interested</span>
+    </div>
+  `;
+}
+
+/* ══════════════════════════════════════════
+   MARKER LEGEND (host only)
+   ══════════════════════════════════════════ */
+function renderMarkerLegend(markers) {
+  const el = document.getElementById("h-legend");
+  if (!el) return;
+  if (!markers || markers.length === 0) { el.innerHTML = ""; return; }
+
+  const items = markers.map((m, i) => {
+    const color = scoreToColor(m);
+    return `<div class="legend-item">
+      <span class="legend-dot" style="background:${color}"></span>
+      <span>${ROUND_LABELS[i]?.name ?? `R${i+1}`}: <strong>${m}%</strong></span>
+    </div>`;
+  }).join("");
+
+  const last = markers[markers.length - 1];
+  const cur  = average(state.votes);
+  const diff = cur - last;
+  const arrow = diff > 0 ? "▲" : diff < 0 ? "▼" : "—";
+  const diffColor = diff > 0 ? "#22c55e" : diff < 0 ? "#ef4444" : "#888";
+
+  el.innerHTML = `
+    <div class="legend-wrap">
+      ${items}
+      ${markers.length > 0 && state.roundOpen ? `
+        <div class="legend-item">
+          <span style="color:${diffColor};font-weight:700">${arrow} ${Math.abs(diff)}pts</span>
+          <span style="color:#888">vs last round</span>
+        </div>` : ""}
+    </div>
+  `;
+}
+
+/* Convert 0-100 score to a CSS color (red→yellow→green) */
+function scoreToColor(score) {
+  const r = score < 50 ? 239 : Math.round(239 - (score - 50) * 3.9);
+  const g = score > 50 ? 34  : Math.round((score / 50) * 180);
+  return `rgb(${r},${g},60)`;
+}
+
+/* ══════════════════════════════════════════
+   QR CODE
+   ══════════════════════════════════════════ */
+function buildQR() {
+  const voterURL = window.location.origin + window.location.pathname;
+  const canvas   = document.getElementById("qr-canvas");
+  if (!canvas) return;
+  try {
+    QRCode.draw(voterURL, null, canvas, 96);
+    document.getElementById("qr-url").textContent = voterURL;
+  } catch(e) {
+    document.getElementById("qr-panel").style.display = "none";
+  }
+}
+
+/* ══════════════════════════════════════════
+   INIT
+   ══════════════════════════════════════════ */
+document.addEventListener("DOMContentLoaded", () => {
+  /* Show correct shell */
+  if (isHost) {
+    document.getElementById("host-view").style.display  = "flex";
+    document.getElementById("voter-view").style.display = "none";
+    buildQR();
+  } else {
+    document.getElementById("voter-view").style.display = "flex";
+    document.getElementById("host-view").style.display  = "none";
+    /* Wire vote buttons */
+    ["interested","neutral","bored"].forEach(e => {
+      document.getElementById(`vote-${e}`)?.addEventListener("click", () => castVote(e));
+    });
+  }
+});
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #f0f2f5;
+  --surface: #ffffff;
+  --border:  #e2e8f0;
+  --text:    #1a202c;
+  --muted:   #718096;
+  --radius:  16px;
+  --ease:    cubic-bezier(.4,0,.2,1);
+}
+
+html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+/* ════════════════════════════════════════
+   HOST VIEW
+   ════════════════════════════════════════ */
+#host-view {
+  display: none;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 32px 28px 28px;
+  max-width: 900px;
+  margin: 0 auto;
+  gap: 24px;
+}
+
+.host-topbar {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+}
+.round-pill {
+  font-size: .8rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  background: #1a202c; color: #fff; padding: 6px 16px; border-radius: 99px;
+}
+.status-badge {
+  font-size: .82rem; font-weight: 600; padding: 5px 14px; border-radius: 99px;
+}
+.status-badge.open   { background: #dcfce7; color: #166534; }
+.status-badge.closed { background: #fee2e2; color: #991b1b; }
+
+.host-prompt {
+  font-size: clamp(1.2rem, 2.8vw, 1.7rem);
+  font-weight: 700; text-align: center; color: var(--text);
+  padding: 0 8px;
+}
+
+.vote-count {
+  text-align: center; font-size: .9rem; color: var(--muted); margin-top: -10px;
+}
+
+/* ── Gradient bar ── */
+.bar-outer {
+  position: relative;
+  width: 100%; height: 56px;
+  border-radius: 99px; overflow: visible;
+  margin: 12px 0 8px;
+}
+.bar-gradient {
+  position: absolute; inset: 0;
+  border-radius: 99px;
+  background: linear-gradient(to right,
+    #ef4444 0%,
+    #f97316 25%,
+    #facc15 50%,
+    #84cc16 75%,
+    #22c55e 100%
+  );
+  box-shadow: 0 2px 16px rgba(0,0,0,.12);
+}
+
+/* Cursor (live position) */
+.bar-cursor {
+  position: absolute; top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center;
+  transition: left .6s var(--ease);
+  z-index: 10;
+  pointer-events: none;
+}
+.cursor-needle {
+  width: 4px; height: 72px;
+  background: #1a202c;
+  border-radius: 2px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+.cursor-bubble {
+  position: absolute; top: -30px;
+  background: #1a202c; color: #fff;
+  font-size: .85rem; font-weight: 800;
+  padding: 4px 10px; border-radius: 8px;
+  white-space: nowrap;
+}
+.cursor-bubble::after {
+  content: '';
+  position: absolute; top: 100%; left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #1a202c;
+}
+
+/* Round marker pins */
+.marker-pin {
+  position: absolute; top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center;
+  z-index: 5;
+  pointer-events: none;
+}
+.marker-line {
+  width: 2px; height: 64px;
+  background: rgba(255,255,255,.85);
+  border-radius: 1px;
+}
+.marker-dot {
+  width: 10px; height: 10px;
+  background: #fff; border: 2px solid #1a202c;
+  border-radius: 50%; margin-top: -2px;
+}
+.marker-label {
+  margin-top: 4px;
+  font-size: .7rem; font-weight: 700;
+  color: #1a202c;
+  background: rgba(255,255,255,.9);
+  padding: 1px 5px; border-radius: 4px;
+}
+
+/* End labels */
+.bar-labels-row {
+  display: flex; justify-content: space-between;
+  font-size: .82rem; color: var(--muted); font-weight: 500;
+  padding: 0 4px; margin-top: 44px;
+}
+
+/* Legend */
+.legend-wrap {
+  display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  padding: 14px 20px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: .88rem; }
+.legend-dot  { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+/* Controls */
+.host-controls {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+}
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 22px; border-radius: 10px;
+  font-size: .93rem; font-weight: 600; cursor: pointer;
+  border: 1.5px solid var(--border);
+  background: var(--surface); color: var(--text);
+  transition: background .15s;
+}
+.btn:hover { background: var(--border); }
+.btn-primary { background: #1a202c; color: #fff; border-color: #1a202c; }
+.btn-primary:hover { background: #2d3748; }
+.btn-danger  { color: #dc2626; border-color: #fca5a5; }
+.btn-danger:hover { background: #fef2f2; }
+
+/* QR panel */
+#qr-panel {
+  display: flex; align-items: center; gap: 16px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 20px;
+  margin-top: auto;
+}
+.qr-info strong { display: block; font-size: .95rem; margin-bottom: 3px; }
+.qr-info small  { color: var(--muted); font-size: .78rem; word-break: break-all; }
+#qr-canvas { border-radius: 6px; flex-shrink: 0; }
+
+/* ════════════════════════════════════════
+   VOTER VIEW
+   ════════════════════════════════════════ */
+#voter-view {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 36px 20px 32px;
+  gap: 20px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+#v-prompt {
+  font-size: clamp(1.1rem, 4vw, 1.4rem);
+  font-weight: 700; text-align: center;
+}
+
+.v-bar-section { width: 100%; padding: 8px 0 0; }
+
+#v-vote-count {
+  font-size: .82rem; color: var(--muted); text-align: center; margin-top: 42px;
+}
+
+/* Voter vote buttons */
+#v-buttons {
+  display: flex; flex-direction: column; gap: 14px;
+  width: 100%; max-width: 340px;
+}
+.vote-btn {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 20px 24px; border-radius: 14px; border: none;
+  font-size: 1.15rem; font-weight: 700; color: #fff; cursor: pointer;
+  transition: transform .1s, opacity .15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.vote-btn:active { transform: scale(.96); }
+.vote-btn .v-emoji { font-size: 1.8rem; }
+#vote-interested { background: #22c55e; }
+#vote-neutral    { background: #facc15; color: #713f12; }
+#vote-bored      { background: #ef4444; }
+
+/* After-vote screens */
+#v-wait, #v-closed {
+  display: none;
+  flex-direction: column; align-items: center; gap: 10px;
+  text-align: center;
+}
+.state-icon  { font-size: 3rem; }
+.state-title { font-size: 1.2rem; font-weight: 700; }
+.state-sub   { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════
+     HOST VIEW  (?mode=host)
+     ════════════════════════════════════════ -->
+<div id="host-view">
+
+  <div class="host-topbar">
+    <span class="round-pill" id="h-round-pill">Round 1 / 3 — Opening</span>
+    <span class="status-badge open" id="h-status">Voting open</span>
+  </div>
+
+  <div class="host-prompt" id="h-prompt">How are you feeling before we start?</div>
+  <div class="vote-count" id="h-vote-count">0 votes received</div>
+
+  <!-- The gradient bar -->
+  <div id="h-bar-wrap"></div>
+
+  <!-- Round comparison legend -->
+  <div id="h-legend"></div>
+
+  <!-- Host controls -->
+  <div class="host-controls">
+    <button class="btn btn-primary" id="h-btn-close">Close this round</button>
+    <button class="btn btn-primary" id="h-btn-next" style="display:none">Open round 2</button>
+    <button class="btn btn-danger"  id="h-btn-reset">Reset all</button>
+  </div>
+
+  <!-- QR code -->
+  <div id="qr-panel">
+    <canvas id="qr-canvas"></canvas>
+    <div class="qr-info">
+      <strong>Scan to vote</strong>
+      <small id="qr-url"></small>
+    </div>
+  </div>
+
+</div>
+
+<!-- ════════════════════════════════════════
+     VOTER VIEW  (default, no ?mode=host)
+     ════════════════════════════════════════ -->
+<div id="voter-view">
+
+  <div id="v-prompt">How are you feeling before we start?</div>
+
+  <div class="v-bar-section">
+    <div id="v-bar-wrap"></div>
+    <div id="v-vote-count">0 votes</div>
+  </div>
+
+  <!-- Voting buttons -->
+  <div id="v-buttons">
+    <button class="vote-btn" id="vote-interested">
+      <span class="v-emoji">😄</span> Interested
+    </button>
+    <button class="vote-btn" id="vote-neutral">
+      <span class="v-emoji">😐</span> Neutral
+    </button>
+    <button class="vote-btn" id="vote-bored">
+      <span class="v-emoji">😴</span> Bored
+    </button>
+  </div>
+
+  <!-- After voting -->
+  <div id="v-wait">
+    <div class="state-icon">✅</div>
+    <div class="state-title">Vote recorded!</div>
+    <div class="state-sub">Watch the bar update on screen.</div>
+  </div>
+
+  <!-- Round closed -->
+  <div id="v-closed">
+    <div class="state-icon">⏸️</div>
+    <div class="state-title">Round closed</div>
+    <div class="state-sub">The presenter will open the next round shortly.</div>
+  </div>
+
+</div>
+
+<!-- ════════════════════════════════════════
+     INLINE QR CODE GENERATOR (MIT, no CDN)
+     ════════════════════════════════════════ -->
+<script>
+var QRCode=function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this.parsedData=[];for(var b=[],d=0,e=this.data.length;d<e;d++){var f=this.data.charCodeAt(d);f>65536?(b[0]=240|(1835008&f)>>18,b[1]=128|(258048&f)>>12,b[2]=128|(4032&f)>>6,b[3]=63&f):f>2048?(b[0]=224|(61440&f)>>12,b[1]=128|(4032&f)>>6,b[2]=63&f):f>128?(b[0]=192|(1984&f)>>6,b[1]=63&f):b[0]=f,this.parsedData=this.parsedData.concat(b)}this.parsedData.length!=this.data.length&&(this.parsedData.unshift(191),this.parsedData.unshift(187),this.parsedData.unshift(239))}function b(a,b){this.typeNumber=a,this.errorCorrectLevel=b,this.modules=null,this.moduleCount=0,this.dataCache=null,this.dataList=[]}var c={MODE_NUMBER:1,MODE_ALPHA_NUM:2,MODE_8BIT_BYTE:4,MODE_KANJI:8},d={L:1,M:0,Q:3,H:2},e={PATTERN000:0,PATTERN001:1,PATTERN010:2,PATTERN011:3,PATTERN100:4,PATTERN101:5,PATTERN110:6,PATTERN111:7};a.prototype={getLength:function(){return this.parsedData.length},write:function(a){for(var b=0,c=this.parsedData.length;b<c;b++)a.put(this.parsedData[b],8)}},b.prototype={addData:function(b){var c=new a(b);this.dataList.push(c),this.dataCache=null},isDark:function(a,b){if(a<0||this.moduleCount<=a||b<0||this.moduleCount<=b)throw new Error(a+","+b);return this.modules[a][b]},getModuleCount:function(){return this.moduleCount},make:function(){this.makeImpl(!1,this.getBestMaskPattern())},makeImpl:function(a,c){this.moduleCount=4*this.typeNumber+17,this.modules=new Array(this.moduleCount);for(var d=0;d<this.moduleCount;d++){this.modules[d]=new Array(this.moduleCount);for(var e=0;e<this.moduleCount;e++)this.modules[d][e]=null}this.setupPositionProbePattern(0,0),this.setupPositionProbePattern(this.moduleCount-7,0),this.setupPositionProbePattern(0,this.moduleCount-7),this.setupPositionAdjustPattern(),this.setupTimingPattern(),this.setupTypeInfo(a,c),(this.typeNumber>=7)&&this.setupTypeNumber(a),this.dataCache==null&&(this.dataCache=b.createData(this.typeNumber,this.errorCorrectLevel,this.dataList)),this.mapData(this.dataCache,c)},setupPositionProbePattern:function(a,b){for(var c=-1;c<=7;c++){if(a+c<=-1||this.moduleCount<=a+c)continue;for(var d=-1;d<=7;d++){if(b+d<=-1||this.moduleCount<=b+d)continue;this.modules[a+c][b+d]=(c>=0&&c<=6&&(d==0||d==6))||(d>=0&&d<=6&&(c==0||c==6))||(c>=2&&c<=4&&d>=2&&d<=4)}}},getBestMaskPattern:function(){var a=0,b=0;for(var c=0;c<8;c++){this.makeImpl(!0,c);var d=f.getLostPoint(this);(c==0||a>d)&&(a=d,b=c)}return b},setupTimingPattern:function(){for(var a=8;a<this.moduleCount-8;a++){if(this.modules[a][6]!=null)continue;this.modules[a][6]=(a%2==0)}for(var b=8;b<this.moduleCount-8;b++){if(this.modules[6][b]!=null)continue;this.modules[6][b]=(b%2==0)}},setupPositionAdjustPattern:function(){var a=f.getPatternPosition(this.typeNumber);for(var b=0;b<a.length;b++){for(var c=0;c<a.length;c++){var d=a[b],e=a[c];if(this.modules[d][e]!=null)continue;for(var g=-2;g<=2;g++){for(var h=-2;h<=2;h++){this.modules[d+g][e+h]=(g==-2||g==2||h==-2||h==2||g==0&&h==0)}}}}},setupTypeNumber:function(a){var b=f.getBCHTypeNumber(this.typeNumber),c;for(c=0;c<18;c++){var d=(!a&&((b>>c)&1)==1);this.modules[Math.floor(c/3)][c%3+this.moduleCount-8-3]=d}for(c=0;c<18;c++){var d=(!a&&((b>>c)&1)==1);this.modules[c%3+this.moduleCount-8-3][Math.floor(c/3)]=d}},setupTypeInfo:function(a,b){var c=this.errorCorrectLevel<<3|b,d=f.getBCHTypeInfo(c),e;for(e=0;e<6;e++)this.modules[e][8]=(!a&&((d>>e)&1)==1);for(e=7;e<9;e++)this.modules[e][8]=(!a&&((d>>e)&1)==1);for(e=8;e<15;e++)this.modules[e][8]=(!a&&((d>>e)&1)==1);for(e=0;e<8;e++)this.modules[8][this.moduleCount-e-1]=(!a&&((d>>e)&1)==1);for(e=8;e<9;e++)this.modules[8][this.moduleCount-e-1]=(!a&&((d>>e)&1)==1);for(e=9;e<15;e++)this.modules[8][this.moduleCount-e-1]=(!a&&((d>>e)&1)==1);this.modules[this.moduleCount-8][8]=!a},mapData:function(a,b){var c=-1,d=this.moduleCount-1,e=7,g=0;for(var h=this.moduleCount-1;h>0;h-=2){h==6&&h--;for(;;){for(var i=0;i<2;i++){if(this.modules[d][h-i]==null){var j=!1;g<a.length&&(j=((a[g]>>>e)&1)==1);var k=f.getMask(b,d,h-i);k&&(j=!j),this.modules[d][h-i]=j,e--,e==-1&&(g++,e=7)}}d+=c;if(d<0||this.moduleCount<=d){d-=c,c=-c;break}}}}};b.PAD0=236;b.PAD1=17;b.createData=function(a,c,d){var e=g.getRSBlocks(a,c),h=new i;for(var j=0;j<d.length;j++){var k=d[j];h.put(k.mode,4),h.put(k.getLength(),f.getLengthInBits(k.mode,a)),k.write(h)}var l=0;for(var j=0;j<e.length;j++)l+=e[j].dataCount;if(h.getLengthInBits()>8*l)throw new Error("code length overflow. ("+h.getLengthInBits()+">"+8*l+")");if(h.getLengthInBits()+4<=8*l)h.put(0,4);while(h.getLengthInBits()%8!=0)h.putBit(!1);for(;;){if(h.getLengthInBits()>=8*l)break;h.put(b.PAD0,8);if(h.getLengthInBits()>=8*l)break;h.put(b.PAD1,8)}return b.createBytes(h,e)};b.createBytes=function(a,b){var c=0,d=0,e=0,f=new Array(b.length),h=new Array(b.length);for(var i=0;i<b.length;i++){var j=b[i].dataCount,k=b[i].totalCount-j;d=Math.max(d,j),e=Math.max(e,k),f[i]=new Array(j);for(var l=0;l<f[i].length;l++)f[i][l]=255&a.buffer[c++];h[i]=new Array(k);for(var l=0;l<b[i].totalCount-j;l++)h[i][l]=0}var m=0,n=new Array(b.length),o=0;for(var p=0;p<d;p++){for(var i=0;i<b.length;i++)if(p<f[i].length)n[o++]=f[i][p]}for(var p=0;p<e;p++){for(var i=0;i<b.length;i++)if(p<h[i].length)n[o++]=h[i][p]}for(var i=0;i<b.length;i++){var q=g.getErrorCorrectPolynomial(b[i].totalCount-b[i].dataCount),r=new j(f[i].concat(h[i]),q.getLength()-1),s=r.mod(q);for(var l=0;l<q.getLength()-1;l++){var t=l+s.getLength()-(q.getLength()-1);n[m+o++]=t>=0?s.get(t):0}m+=q.getLength()-1}return n};var f={PATTERN_POSITION_TABLE:[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,132],[6,34,60,86,112,136],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]],G15:(1<<10)|(1<<8)|(1<<5)|(1<<4)|(1<<2)|(1<<1)|(1<<0),G18:(1<<12)|(1<<11)|(1<<10)|(1<<9)|(1<<8)|(1<<5)|(1<<2)|(1<<0),G15_MASK:(1<<14)|(1<<12)|(1<<10)|(1<<4)|(1<<1),getBCHTypeInfo:function(a){var b=a<<10;while(f.getBCHDigit(b)-f.getBCHDigit(f.G15)>=0)b^=f.G15<<(f.getBCHDigit(b)-f.getBCHDigit(f.G15));return((a<<10)|b)^f.G15_MASK},getBCHTypeNumber:function(a){var b=a<<12;while(f.getBCHDigit(b)-f.getBCHDigit(f.G18)>=0)b^=f.G18<<(f.getBCHDigit(b)-f.getBCHDigit(f.G18));return(a<<12)|b},getBCHDigit:function(a){var b=0;while(a!=0){b++;a>>>=1}return b},getPatternPosition:function(a){return f.PATTERN_POSITION_TABLE[a-1]},getMask:function(a,b,c){switch(a){case e.PATTERN000:return(b+c)%2==0;case e.PATTERN001:return b%2==0;case e.PATTERN010:return c%3==0;case e.PATTERN011:return(b+c)%3==0;case e.PATTERN100:return(Math.floor(b/2)+Math.floor(c/3))%2==0;case e.PATTERN101:return(b*c)%2+(b*c)%3==0;case e.PATTERN110:return((b*c)%2+(b*c)%3)%2==0;case e.PATTERN111:return((b*c)%3+(b+c)%2)%2==0;default:throw new Error("bad maskPattern:"+a)}},getErrorCorrectPolynomial:function(a){var b=new j([1],0);for(var c=0;c<a;c++)b=b.multiply(new j([1,h.gexp(c)],0));return b},getLengthInBits:function(a,b){if(1<=b&&b<10){switch(a){case c.MODE_NUMBER:return 10;case c.MODE_ALPHA_NUM:return 9;case c.MODE_8BIT_BYTE:return 8;case c.MODE_KANJI:return 8;default:throw new Error("mode:"+a)}}else if(b<27){switch(a){case c.MODE_NUMBER:return 12;case c.MODE_ALPHA_NUM:return 11;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 10;default:throw new Error("mode:"+a)}}else if(b<41){switch(a){case c.MODE_NUMBER:return 14;case c.MODE_ALPHA_NUM:return 13;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 12;default:throw new Error("mode:"+a)}}else throw new Error("type:"+b)},getLostPoint:function(a){var b=a.getModuleCount(),c=0;for(var d=0;d<b;d++){for(var e=0;e<b;e++){var f=0,g=a.isDark(d,e);for(var h=-1;h<=1;h++){if(d+h<0||b<=d+h)continue;for(var i=-1;i<=1;i++){if(e+i<0||b<=e+i)continue;if(h==0&&i==0)continue;g==a.isDark(d+h,e+i)&&f++}}f>5&&(c+=(3+f-5))}}for(var d=0;d<b-1;d++){for(var e=0;e<b-1;e++){var j=0;a.isDark(d,e)&&j++,a.isDark(d+1,e)&&j++,a.isDark(d,e+1)&&j++,a.isDark(d+1,e+1)&&j++;(j==0||j==4)&&(c+=3)}}for(var d=0;d<b;d++){for(var e=0;e<b-6;e++)a.isDark(d,e)&&!a.isDark(d,e+1)&&a.isDark(d,e+2)&&a.isDark(d,e+3)&&a.isDark(d,e+4)&&!a.isDark(d,e+5)&&a.isDark(d,e+6)&&(c+=40)}for(var e=0;e<b;e++){for(var d=0;d<b-6;d++)a.isDark(d,e)&&!a.isDark(d+1,e)&&a.isDark(d+2,e)&&a.isDark(d+3,e)&&a.isDark(d+4,e)&&!a.isDark(d+5,e)&&a.isDark(d+6,e)&&(c+=40)}var k=0;for(var e=0;e<b;e++)for(var d=0;d<b;d++)a.isDark(d,e)&&k++;var l=Math.abs(100*k/b/b-50)/5;return c+=10*l,c}};var g={RS_BLOCK_TABLE:[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12,7,37,13],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]],getRSBlocks:function(a,b){var c=g.getRsBlockTable(a,b);if(c==undefined)throw new Error("bad rs block @ typeNumber:"+a+"/errorCorrectLevel:"+b);var d=c.length/3,e=[];for(var f=0;f<d;f++){var h=c[3*f+0],i=c[3*f+1],j=c[3*f+2];for(var k=0;k<h;k++)e.push(new l(i,j))}return e},getRsBlockTable:function(a,b){switch(b){case d.L:return g.RS_BLOCK_TABLE[(a-1)*4+0];case d.M:return g.RS_BLOCK_TABLE[(a-1)*4+1];case d.Q:return g.RS_BLOCK_TABLE[(a-1)*4+2];case d.H:return g.RS_BLOCK_TABLE[(a-1)*4+3];default:return undefined}}};var h={glog:function(a){if(a<1)throw new Error("glog("+a+")");return h.LOG_TABLE[a]},gexp:function(a){while(a<0)a+=255;while(a>=256)a-=255;return h.EXP_TABLE[a]},EXP_TABLE:new Array(256),LOG_TABLE:new Array(256)};for(var i=0;i<8;i++)h.EXP_TABLE[i]=1<<i;for(var i=8;i<256;i++)h.EXP_TABLE[i]=h.EXP_TABLE[i-4]^h.EXP_TABLE[i-5]^h.EXP_TABLE[i-6]^h.EXP_TABLE[i-8];for(var i=0;i<255;i++)h.LOG_TABLE[h.EXP_TABLE[i]]=i;var i=function(a,b){this.num=new Array(a.length+b);for(var c=0;c<this.num.length;c++)this.num[c]=0;for(var c=0;c<a.length;c++)this.num[c+b]=a[c]};i.prototype={get:function(a){return this.num[a]},getLength:function(){return this.num.length},multiply:function(a){var b=new i(new Array(this.getLength()+a.getLength()-1),0);for(var c=0;c<this.getLength();c++)for(var d=0;d<a.getLength();d++)b.num[c+d]^=h.gexp(h.glog(this.get(c))+h.glog(a.get(d)));return b},mod:function(a){if(this.getLength()-a.getLength()<0)return this;var b=h.glog(this.get(0))-h.glog(a.get(0));for(var c=0;c<a.getLength();c++)this.num[c]^=h.gexp(h.glog(a.get(c))+b);var d=new i(new Array(0),0);return this.mod(d)}};var j=function(a,b){if(a.length==undefined)throw new Error(a.length+"/"+b);var c=0;for(c=0;c<a.length;c++)if(a[c]!=0)break;this.num=new Array(a.length-c+b);for(var d=0;d<this.num.length;d++)this.num[d]=0;for(var d=0;d<a.length-c;d++)this.num[d]=a[d+c]};j.prototype={get:function(a){return this.num[a]},getLength:function(){return this.num.length},multiply:function(a){var b=new j(new Array(this.getLength()+a.getLength()-1),0);for(var c=0;c<this.getLength();c++)for(var d=0;d<a.getLength();d++)b.num[c+d]^=h.gexp(h.glog(this.get(c))+h.glog(a.get(d)));return b},mod:function(a){if(this.getLength()-a.getLength()<0)return this;var b=h.glog(this.get(0))-h.glog(a.get(0));for(var c=0;c<a.getLength();c++)this.num[c]^=h.gexp(h.glog(a.get(c))+b);var d=new j(new Array(0),0);return this.mod(d)}};var l=function(a,b){this.totalCount=a,this.dataCount=b};return{draw:function(a,b,c,size){var qr=new b(0,d.M);qr.addData(a);qr.make();var n=qr.getModuleCount(),cv=c,s=size||120;cv.width=cv.height=s;var ctx=cv.getContext("2d");ctx.fillStyle="#fff";ctx.fillRect(0,0,s,s);for(var r=0;r<n;r++)for(var col=0;col<n;col++){ctx.fillStyle=qr.isDark(r,col)?"#000":"#fff";var x=Math.floor(col*s/n),y=Math.floor(r*s/n),w=Math.floor((col+1)*s/n)-x,h2=Math.floor((r+1)*s/n)-y;ctx.fillRect(x,y,w,h2)}},QRCodeModel:b,ErrorCorrectLevel:d}}();
+</script>
+</body>
+</html>
