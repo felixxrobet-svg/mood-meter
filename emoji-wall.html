@@ -4,11 +4,11 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Emoji Wall</title>
- 
+
 <script type="module">
 import { initializeApp }                                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, onChildAdded, push, remove, query, limitToLast } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
- 
+
 /* ── FIREBASE CONFIG ─────────────────────────────────────── */
 const firebaseConfig = {
   apiKey:            "AIzaSyBJNXiWlC4B5AkJ5p-AN7-LPaFZJ67SxP4",
@@ -19,35 +19,35 @@ const firebaseConfig = {
   messagingSenderId: "605835927002",
   appId:             "1:605835927002:web:5bd5f8a114239ae29b34e3"
 };
- 
+
 /* ── EMOJI SET ───────────────────────────────────────────── */
 const EMOJIS = ["🔥","😂","👏","🤯","🙌","👍","🤔","😲","👎","🎉"];
- 
+
 const app     = initializeApp(firebaseConfig);
 const db      = getDatabase(app);
 const wallRef = ref(db, "emoji_wall");
 const isHost  = new URLSearchParams(window.location.search).get("mode") === "host";
- 
+
 /* ══════════════════════════════════════════════════════════
    HOST VIEW — falling emoji on green screen background
    ══════════════════════════════════════════════════════════ */
 function mountHost() {
   document.getElementById("host-view").style.display  = "block";
   document.getElementById("voter-view").style.display = "none";
- 
+
   const canvas = document.getElementById("wall-canvas");
   const ctx    = canvas.getContext("2d");
- 
+
   function resize() {
     canvas.width  = window.innerWidth;
     canvas.height = window.innerHeight;
   }
   resize();
   window.addEventListener("resize", resize);
- 
+
   /* Particle pool */
   const particles = [];
- 
+
   function spawnEmoji(emoji) {
     const count = 1 + Math.floor(Math.random() * 2);
     for (let i = 0; i < count; i++) {
@@ -68,25 +68,25 @@ function mountHost() {
       }, i * 100);
     }
   }
- 
+
   function animate() {
     /* Green screen background — pure chroma key green */
     ctx.fillStyle = "#00b140";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
- 
+
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.y      += p.vy;
       p.x      += p.vx + Math.sin(p.wobble) * 0.7;
       p.wobble += p.wobbleSpeed;
       p.angle  += p.rot;
- 
+
       if (p.y > canvas.height * 0.78) p.alpha -= 0.022;
       if (p.alpha <= 0 || p.y > canvas.height + 100) {
         particles.splice(i, 1);
         continue;
       }
- 
+
       ctx.save();
       ctx.globalAlpha = p.alpha;
       ctx.translate(p.x, p.y);
@@ -100,22 +100,25 @@ function mountHost() {
     requestAnimationFrame(animate);
   }
   animate();
- 
-  /* Listen for new emojis */
-  const recentQ = query(wallRef, limitToLast(1));
-  onChildAdded(recentQ, (snap) => {
-    const data = snap.val();
-    if (data && data.emoji) spawnEmoji(data.emoji);
-  });
- 
-  /* Counter + clear */
+
+  /* Listen for ALL new emojis in real time
+     We track the startup time so we only animate emojis
+     added AFTER the page loaded — not historical ones */
+  const startTime = Date.now();
   let total = 0;
-  onChildAdded(ref(db, "emoji_wall"), () => {
+
+  onChildAdded(wallRef, (snap) => {
+    const data = snap.val();
+    if (!data) return;
     total++;
     const el = document.getElementById("h-counter");
     if (el) el.textContent = `${total} reaction${total !== 1 ? "s" : ""}`;
+    /* Only animate emojis sent after page load */
+    if (data.ts && data.ts > startTime && data.emoji) {
+      spawnEmoji(data.emoji);
+    }
   });
- 
+
   document.getElementById("h-btn-clear").addEventListener("click", () => {
     if (!confirm("Clear all reactions?")) return;
     remove(wallRef);
@@ -125,18 +128,18 @@ function mountHost() {
     if (el) el.textContent = "0 reactions";
   });
 }
- 
+
 /* ══════════════════════════════════════════════════════════
    VOTER VIEW — big emoji buttons
    ══════════════════════════════════════════════════════════ */
 function mountVoter() {
   document.getElementById("voter-view").style.display = "flex";
   document.getElementById("host-view").style.display  = "none";
- 
+
   const grid = document.getElementById("v-emoji-grid");
   const MAX_VOTES = 15;
   let voteCount = parseInt(localStorage.getItem("ew_vote_count") || "0");
- 
+
   const counterEl = document.getElementById("v-counter");
   function updateCounter() {
     const remaining = MAX_VOTES - voteCount;
@@ -150,7 +153,7 @@ function mountVoter() {
     });
   }
   updateCounter();
- 
+
   EMOJIS.forEach(emoji => {
     const btn = document.createElement("button");
     btn.className   = "emoji-btn";
@@ -172,16 +175,16 @@ function mountVoter() {
     grid.appendChild(btn);
   });
 }
- 
+
 document.addEventListener("DOMContentLoaded", () => {
   if (isHost) mountHost(); else mountVoter();
 });
 </script>
- 
+
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
- 
+
 /* ════════════════════════════════════════
    HOST VIEW — full green screen canvas
    ════════════════════════════════════════ */
@@ -191,12 +194,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
   width: 100vw; height: 100vh;
   background: #00b140;
 }
- 
+
 #wall-canvas {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
 }
- 
+
 /* HUD overlay (semi-transparent, won't show on chroma key) */
 .host-hud {
   position: absolute; top: 0; left: 0; right: 0;
@@ -221,7 +224,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
   color: #fca5a5; cursor: pointer; transition: background .15s;
 }
 .btn-clear:hover { background: rgba(239,68,68,.4); }
- 
+
 /* ════════════════════════════════════════
    VOTER VIEW — dark, mobile-friendly
    ════════════════════════════════════════ */
@@ -235,21 +238,21 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
   gap: 20px;
   overflow-y: auto;
 }
- 
+
 .voter-title {
   font-size: 1.4rem; font-weight: 800; color: #fff; text-align: center;
 }
 .voter-sub {
   font-size: .95rem; color: rgba(255,255,255,.4); text-align: center; margin-top: -10px;
 }
- 
+
 #v-emoji-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   width: 100%; max-width: 360px;
 }
- 
+
 .emoji-btn {
   position: relative;
   font-size: 2.2rem;
@@ -264,7 +267,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
 .emoji-btn:hover   { background: rgba(255,255,255,.14); }
 .emoji-btn:active,
 .emoji-btn.tapped  { transform: scale(.88); background: rgba(255,255,255,.2); }
- 
+
 /* Floating emoji feedback on tap */
 .float-emoji {
   position: absolute;
@@ -278,14 +281,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
   0%   { opacity: 1; transform: translateX(-50%) translateY(0); }
   100% { opacity: 0; transform: translateX(-50%) translateY(-60px); }
 }
- 
+
 .v-hint {
   font-size: .8rem; color: rgba(255,255,255,.25); text-align: center;
 }
 </style>
 </head>
 <body>
- 
+
 <!-- HOST VIEW -->
 <div id="host-view">
   <canvas id="wall-canvas"></canvas>
@@ -295,7 +298,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
     <button class="btn-clear" id="h-btn-clear">Clear</button>
   </div>
 </div>
- 
+
 <!-- VOTER VIEW -->
 <div id="voter-view">
   <div class="voter-title">React now!</div>
@@ -303,6 +306,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overf
   <div id="v-emoji-grid"></div>
   <div id="v-counter" class="v-hint">15 reactions left</div>
 </div>
- 
+
 </body>
 </html>
