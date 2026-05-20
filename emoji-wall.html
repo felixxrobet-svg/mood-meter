@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Emoji Wall</title>
+ 
+<script type="module">
+import { initializeApp }                                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onChildAdded, push, remove, query, limitToLast } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+ 
+/* ── FIREBASE CONFIG ─────────────────────────────────────── */
+const firebaseConfig = {
+  apiKey:            "AIzaSyBJNXiWlC4B5AkJ5p-AN7-LPaFZJ67SxP4",
+  authDomain:        "mood-meter-ebb22.firebaseapp.com",
+  databaseURL:       "https://mood-meter-ebb22-default-rtdb.firebaseio.com",
+  projectId:         "mood-meter-ebb22",
+  storageBucket:     "mood-meter-ebb22.firebasestorage.app",
+  messagingSenderId: "605835927002",
+  appId:             "1:605835927002:web:5bd5f8a114239ae29b34e3"
+};
+ 
+/* ── EMOJI SET ───────────────────────────────────────────── */
+const EMOJIS = ["🔥","😂","👏","🤯","🙌","👍","🤔","😲","👎","🎉"];
+ 
+const app     = initializeApp(firebaseConfig);
+const db      = getDatabase(app);
+const wallRef = ref(db, "emoji_wall");
+const isHost  = new URLSearchParams(window.location.search).get("mode") === "host";
+ 
+/* ══════════════════════════════════════════════════════════
+   HOST VIEW — falling emoji on green screen background
+   ══════════════════════════════════════════════════════════ */
+function mountHost() {
+  document.getElementById("host-view").style.display  = "block";
+  document.getElementById("voter-view").style.display = "none";
+ 
+  const canvas = document.getElementById("wall-canvas");
+  const ctx    = canvas.getContext("2d");
+ 
+  function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", resize);
+ 
+  /* Particle pool */
+  const particles = [];
+ 
+  function spawnEmoji(emoji) {
+    const count = 1 + Math.floor(Math.random() * 2);
+    for (let i = 0; i < count; i++) {
+      setTimeout(() => {
+        particles.push({
+          emoji,
+          x     : 60 + Math.random() * (canvas.width - 120),
+          y     : -60,
+          vy    : 2.8 + Math.random() * 3.5,
+          vx    : (Math.random() - 0.5) * 1.6,
+          angle : Math.random() * Math.PI * 2,
+          rot   : (Math.random() - 0.5) * 0.07,
+          size  : 48 + Math.random() * 36,
+          alpha : 1,
+          wobble: Math.random() * Math.PI * 2,
+          wobbleSpeed: 0.04 + Math.random() * 0.03,
+        });
+      }, i * 100);
+    }
+  }
+ 
+  function animate() {
+    /* Green screen background — pure chroma key green */
+    ctx.fillStyle = "#00b140";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+ 
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.y      += p.vy;
+      p.x      += p.vx + Math.sin(p.wobble) * 0.7;
+      p.wobble += p.wobbleSpeed;
+      p.angle  += p.rot;
+ 
+      if (p.y > canvas.height * 0.78) p.alpha -= 0.022;
+      if (p.alpha <= 0 || p.y > canvas.height + 100) {
+        particles.splice(i, 1);
+        continue;
+      }
+ 
+      ctx.save();
+      ctx.globalAlpha = p.alpha;
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle);
+      ctx.font = `${p.size}px serif`;
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(p.emoji, 0, 0);
+      ctx.restore();
+    }
+    requestAnimationFrame(animate);
+  }
+  animate();
+ 
+  /* Listen for new emojis */
+  const recentQ = query(wallRef, limitToLast(1));
+  onChildAdded(recentQ, (snap) => {
+    const data = snap.val();
+    if (data && data.emoji) spawnEmoji(data.emoji);
+  });
+ 
+  /* Counter + clear */
+  let total = 0;
+  onChildAdded(ref(db, "emoji_wall"), () => {
+    total++;
+    const el = document.getElementById("h-counter");
+    if (el) el.textContent = `${total} reaction${total !== 1 ? "s" : ""}`;
+  });
+ 
+  document.getElementById("h-btn-clear").addEventListener("click", () => {
+    if (!confirm("Clear all reactions?")) return;
+    remove(wallRef);
+    total = 0;
+    particles.length = 0;
+    const el = document.getElementById("h-counter");
+    if (el) el.textContent = "0 reactions";
+  });
+}
+ 
+/* ══════════════════════════════════════════════════════════
+   VOTER VIEW — big emoji buttons
+   ══════════════════════════════════════════════════════════ */
+function mountVoter() {
+  document.getElementById("voter-view").style.display = "flex";
+  document.getElementById("host-view").style.display  = "none";
+ 
+  const grid = document.getElementById("v-emoji-grid");
+  const MAX_VOTES = 15;
+  let voteCount = parseInt(localStorage.getItem("ew_vote_count") || "0");
+ 
+  const counterEl = document.getElementById("v-counter");
+  function updateCounter() {
+    const remaining = MAX_VOTES - voteCount;
+    counterEl.textContent = remaining > 0
+      ? remaining + " reaction" + (remaining !== 1 ? "s" : "") + " left"
+      : "No reactions left!";
+    counterEl.style.color = remaining <= 3 ? "rgba(239,68,68,.8)" : "rgba(255,255,255,.35)";
+    document.querySelectorAll(".emoji-btn").forEach(b => {
+      b.disabled = remaining <= 0;
+      b.style.opacity = remaining <= 0 ? "0.35" : "1";
+    });
+  }
+  updateCounter();
+ 
+  EMOJIS.forEach(emoji => {
+    const btn = document.createElement("button");
+    btn.className   = "emoji-btn";
+    btn.textContent = emoji;
+    btn.addEventListener("click", () => {
+      if (voteCount >= MAX_VOTES) return;
+      push(wallRef, { emoji, ts: Date.now() });
+      voteCount++;
+      localStorage.setItem("ew_vote_count", voteCount);
+      updateCounter();
+      btn.classList.add("tapped");
+      setTimeout(() => btn.classList.remove("tapped"), 180);
+      const float = document.createElement("span");
+      float.className   = "float-emoji";
+      float.textContent = emoji;
+      btn.appendChild(float);
+      setTimeout(() => float.remove(), 700);
+    });
+    grid.appendChild(btn);
+  });
+}
+ 
+document.addEventListener("DOMContentLoaded", () => {
+  if (isHost) mountHost(); else mountVoter();
+});
+</script>
+ 
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+ 
+/* ════════════════════════════════════════
+   HOST VIEW — full green screen canvas
+   ════════════════════════════════════════ */
+#host-view {
+  display: none;
+  position: relative;
+  width: 100vw; height: 100vh;
+  background: #00b140;
+}
+ 
+#wall-canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+}
+ 
+/* HUD overlay (semi-transparent, won't show on chroma key) */
+.host-hud {
+  position: absolute; top: 0; left: 0; right: 0;
+  z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 24px;
+  /* Dark strip — will be slightly visible but above the green area OBS crops */
+  background: rgba(0,0,0,.55);
+}
+.hud-title {
+  font-size: 1.1rem; font-weight: 800; color: #fff;
+}
+#h-counter {
+  font-size: .9rem; font-weight: 600; color: rgba(255,255,255,.8);
+  background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.2);
+  padding: 5px 14px; border-radius: 99px;
+}
+.btn-clear {
+  padding: 7px 16px; border-radius: 8px;
+  font-size: .82rem; font-weight: 600;
+  background: rgba(239,68,68,.2); border: 1px solid rgba(239,68,68,.35);
+  color: #fca5a5; cursor: pointer; transition: background .15s;
+}
+.btn-clear:hover { background: rgba(239,68,68,.4); }
+ 
+/* ════════════════════════════════════════
+   VOTER VIEW — dark, mobile-friendly
+   ════════════════════════════════════════ */
+#voter-view {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  background: #0a0a0f;
+  padding: 32px 20px 24px;
+  gap: 20px;
+  overflow-y: auto;
+}
+ 
+.voter-title {
+  font-size: 1.4rem; font-weight: 800; color: #fff; text-align: center;
+}
+.voter-sub {
+  font-size: .95rem; color: rgba(255,255,255,.4); text-align: center; margin-top: -10px;
+}
+ 
+#v-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  width: 100%; max-width: 360px;
+}
+ 
+.emoji-btn {
+  position: relative;
+  font-size: 2.2rem;
+  width: 100%; aspect-ratio: 1;
+  border: none; border-radius: 16px;
+  background: rgba(255,255,255,.08);
+  cursor: pointer;
+  transition: transform .1s, background .15s;
+  -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+}
+.emoji-btn:hover   { background: rgba(255,255,255,.14); }
+.emoji-btn:active,
+.emoji-btn.tapped  { transform: scale(.88); background: rgba(255,255,255,.2); }
+ 
+/* Floating emoji feedback on tap */
+.float-emoji {
+  position: absolute;
+  top: 0; left: 50%;
+  transform: translateX(-50%);
+  font-size: 1.6rem;
+  pointer-events: none;
+  animation: floatUp .7s ease forwards;
+}
+@keyframes floatUp {
+  0%   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-60px); }
+}
+ 
+.v-hint {
+  font-size: .8rem; color: rgba(255,255,255,.25); text-align: center;
+}
+</style>
+</head>
+<body>
+ 
+<!-- HOST VIEW -->
+<div id="host-view">
+  <canvas id="wall-canvas"></canvas>
+  <div class="host-hud">
+    <span class="hud-title">Emoji Wall</span>
+    <span id="h-counter">0 reactions</span>
+    <button class="btn-clear" id="h-btn-clear">Clear</button>
+  </div>
+</div>
+ 
+<!-- VOTER VIEW -->
+<div id="voter-view">
+  <div class="voter-title">React now!</div>
+  <div class="voter-sub">Max 15 reactions per person</div>
+  <div id="v-emoji-grid"></div>
+  <div id="v-counter" class="v-hint">15 reactions left</div>
+</div>
+ 
+</body>
+</html>
